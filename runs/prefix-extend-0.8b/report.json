@@ -1,0 +1,55 @@
+{
+  "run": "jaredpalmer/kev-0.8b",
+  "suite": "evals/v7/decision-v7 development (clean)",
+  "steps": 160,
+  "questions": 160,
+  "state_tokens": {
+    "first": 10,
+    "last": 11735,
+    "median_added_per_step": 46
+  },
+  "extended_steps": 159,
+  "reused_state_tokens": 544544,
+  "parity_vs_scratch": {
+    "bar": 0.04,
+    "tie": 0.04,
+    "max_dp": 0.030017077922821045,
+    "mean_dp": 0.0037899453134741636,
+    "argmax_flips": 2,
+    "violations": [],
+    "pass": true
+  },
+  "cached_prefix_untouched": {
+    "checks": 15,
+    "extended": 15,
+    "bit_identical": 15,
+    "pass": true
+  },
+  "peak_memory_mb": {
+    "extend_on": 2802,
+    "extend_off": 5714
+  },
+  "model_ms": {
+    "extend_on": {
+      "median": 66.2,
+      "by_quarter": [
+        72.4,
+        76.0,
+        43.9,
+        55.8
+      ],
+      "total_s": 9.8
+    },
+    "extend_off": {
+      "median": 164.6,
+      "by_quarter": [
+        97.8,
+        149.6,
+        342.1,
+        953.8
+      ],
+      "total_s": 62.1
+    }
+  },
+  "dtype": "bfloat16"
+}
