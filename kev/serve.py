@@ -5,7 +5,7 @@ Run: uv run --extra serve python -m kev.serve --run runs/kev --port 8008
 TypeSafe-compatible: POST /v1/systemone, GET /v1/models, the `x-typesafe-request-id` response header, and bearer auth
 when KEV_API_KEY is set (unset = open server, the local default). Demo extras: POST /v1/systemone/permute (one Choice
 under several option orders) and POST /v1/systemone/separate (each question in its own pass, for the packed-vs-separate
-comparison). KEV_PREFIX_CACHE / KEV_PREFIX_MIN_TOKENS / KEV_PREFIX_MAX_TOKENS size the state-prefix cache; KEV_DATE_FACTS=1 opts into the
+comparison). KEV_PREFIX_CACHE / KEV_PREFIX_MIN_TOKENS / KEV_PREFIX_MAX_TOKENS size the state-prefix cache, KEV_PREFIX_EXTEND=0 stops a grown state extending a cached one; KEV_DATE_FACTS=1 opts into the
 date preprocessing (api.with_date_facts). Backend and precision follow LoadOptions (KEV_BACKEND, KEV_DTYPE, ...): on Apple
 Silicon the hybrid Qwen3.5 checkpoints run on MLX by default, elsewhere on torch in bf16.
 """
