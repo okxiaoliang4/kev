@@ -11,6 +11,7 @@ Silicon the hybrid Qwen3.5 checkpoints run on MLX by default, elsewhere on torch
 """
 import argparse, asyncio, atexit, hmac, os, queue, random, sys, threading, time, traceback, uuid
 from concurrent.futures import Future
+import numpy as np
 import torch
 from dataclasses import dataclass, field, replace
 from fastapi import FastAPI, HTTPException
@@ -26,6 +27,7 @@ PREFIX_CACHE_SIZE = int(os.environ.get("KEV_PREFIX_CACHE", "4"))          # stat
 PREFIX_MIN_TOKENS = os.environ.get("KEV_PREFIX_MIN_TOKENS")               # states shorter than this are not cached; default = the model's prefix_min_tokens (0 for hybrid backbones and MLX, 384 for attention-only torch models)
 PREFIX_MAX_TOKENS = int(os.environ.get("KEV_PREFIX_MAX_TOKENS", "65536"))  # state tokens the cache holds in all (least recently used evicted first); a longer state is not cached.
                                                                          # One 64k state (Kev-27B: ~1.3 GB of keys, values and DeltaNet states), or four 16k ones, not four 64k ones
+PREFIX_EXTEND = os.environ.get("KEV_PREFIX_EXTEND", "1") == "1"            # a state not in the cache but extending a cached one (a conversation that grew) runs only its new tokens, on models that support it (MLX); 0 = always from scratch
 DATE_FACTS = os.environ.get("KEV_DATE_FACTS", "0") == "1"
 API_KEY = os.environ.get("KEV_API_KEY")                                  # unset = open server; set = require Authorization: Bearer <key>, as the TypeSafe clients always send
 MAX_BATCH = 64                                                           # requests the model thread takes at once (kev.cuda_graphs splits them to fit its buffers)
@@ -45,6 +47,8 @@ class PrefixCache:
     hits: int = 0
     misses: int = 0
     oom_retries: int = 0   # batches that ran out of device memory with states cached, dropped them and ran again (Server._run)
+    extended: int = 0      # misses that started from a cached state they extend (bases)
+    extended_tokens: int = 0   # state tokens those misses did not have to run
 
     def plan(self, encs):
         """-> (key per request, None when its state is not cached; its cached prefix or None; whether to keep a new one)."""
@@ -56,6 +60,24 @@ class PrefixCache:
             if len(survivors) == self.size or tokens + len(key[0]) > self.max_tokens: break
             survivors.add(key); tokens += len(key[0])
         return keys, [self.entries.get(k) if k is not None else None for k in keys], [k in survivors for k in keys]
+
+    def bases(self, model, keys, cached):
+        """Per request: (position, forked cache) to start a missed state from, via model.base_for on the cached state
+        sharing the most leading tokens with it, or None."""
+        out = []
+        for key, hit in zip(keys, cached):
+            best = None
+            if key is not None and hit is None:
+                new = np.asarray(key[0])
+                for (ids, iso), prefix in self.entries.items():
+                    if iso != key[1]: continue
+                    old = np.asarray(ids); n = min(len(old), len(new))
+                    diff = np.flatnonzero(old[:n] != new[:n])
+                    base = model.base_for(prefix, int(diff[0]) if diff.size else n)
+                    if base is not None and (best is None or base[0] > best[0]): best = base
+            if best is not None: self.extended += 1; self.extended_tokens += best[0]
+            out.append(best)
+        return out
 
     def store(self, keys, cached, prefixes):
         """Record hits and misses, and (re)insert the batch's prefixes in order: most recently used last."""
@@ -151,7 +173,9 @@ class Server:
         sync(self.device); t = time.time()
         for retry in (False, True):
             keys, cached, keep = self.prefix_cache.plan(encs)
-            try: ps, prefixes = self.model.probs_batch(encs, cached, keep); break
+            extend = PREFIX_EXTEND and getattr(self.model, "extends_prefix", False) and not retry
+            bases = self.prefix_cache.bases(self.model, keys, cached) if extend else None
+            try: ps, prefixes = self.model.probs_batch(encs, cached, keep, bases) if extend else self.model.probs_batch(encs, cached, keep); break
             except Exception as e:
                 if retry or not self.prefix_cache.entries or not out_of_memory(e): raise
             cached = None; self.prefix_cache.clear(); self.prefix_cache.oom_retries += 1   # after the except: its traceback holds the failed pass's tensors
@@ -159,8 +183,10 @@ class Server:
         sync(self.device); dt = round((time.time() - t) * 1000, 1)
         self.prefix_cache.store(keys, cached, prefixes)
         self.batches += 1; self.batched_requests += len(encs)
-        return [([q.tolist() for q in p], {"tokens": len(enc["ids"]), "state_tokens": enc["seg"].count(0), "latency_ms": dt, "prefix_cache_hit": c is not None})
-                for enc, p, c in zip(encs, ps, cached)]
+        bases = bases or [None] * len(encs)
+        return [([q.tolist() for q in p], {"tokens": len(enc["ids"]), "state_tokens": enc["seg"].count(0), "latency_ms": dt, "prefix_cache_hit": c is not None,
+                                           "prefix_extended_from": b[0] if b is not None else 0})
+                for enc, p, c, b in zip(encs, ps, cached, bases)]
 
     def wait_idle(self):
         """Block until every submitted request is answered and no CUDA graph waits to be captured (benchmarks, warm-up)."""
@@ -262,7 +288,8 @@ def models():
             "temperature": s.model.head.temperature,
             "cuda_graphs": graphs.stats() if (graphs := getattr(s.model, "graphs", None)) else None,
             "prefix_cache": {"size": s.prefix_cache.size, "min_state_tokens": s.prefix_cache.min_tokens, "max_tokens": s.prefix_cache.max_tokens, "hits": s.prefix_cache.hits,
-                             "misses": s.prefix_cache.misses, "cached_states": len(s.prefix_cache.entries), "oom_retries": s.prefix_cache.oom_retries},
+                             "misses": s.prefix_cache.misses, "cached_states": len(s.prefix_cache.entries), "oom_retries": s.prefix_cache.oom_retries,
+                             "extended": s.prefix_cache.extended, "extended_tokens": s.prefix_cache.extended_tokens},
             "batches": {"count": s.batches, "requests": s.batched_requests, "queued": s.queue.qsize()}}
     return {"models": [{"name": name, **card} for name in MODEL_NAMES]}
 
