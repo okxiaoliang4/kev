@@ -27,7 +27,8 @@ PREFIX_CACHE_SIZE = int(os.environ.get("KEV_PREFIX_CACHE", "4"))          # stat
 PREFIX_MIN_TOKENS = os.environ.get("KEV_PREFIX_MIN_TOKENS")               # states shorter than this are not cached; default = the model's prefix_min_tokens (0 for hybrid backbones and MLX, 384 for attention-only torch models)
 PREFIX_MAX_TOKENS = int(os.environ.get("KEV_PREFIX_MAX_TOKENS", "65536"))  # state tokens the cache holds in all (least recently used evicted first); a longer state is not cached.
                                                                          # One 64k state (Kev-27B: ~1.3 GB of keys, values and DeltaNet states), or four 16k ones, not four 64k ones
-PREFIX_EXTEND = os.environ.get("KEV_PREFIX_EXTEND", "1") == "1"            # a state not in the cache but extending a cached one (a conversation that grew) runs only its new tokens, on models that support it (MLX); 0 = always from scratch
+PREFIX_EXTEND = os.environ.get("KEV_PREFIX_EXTEND", "1") == "1"            # a state not in the cache but extending a cached one (a conversation that grew) runs only its new tokens, on models that support it (MLX); 0 = always from scratch.
+                                                                         # Both states must be within KEV_PREFIX_MAX_TOKENS: a longer state is neither cached nor extended
 DATE_FACTS = os.environ.get("KEV_DATE_FACTS", "0") == "1"
 API_KEY = os.environ.get("KEV_API_KEY")                                  # unset = open server; set = require Authorization: Bearer <key>, as the TypeSafe clients always send
 MAX_BATCH = 64                                                           # requests the model thread takes at once (kev.cuda_graphs splits them to fit its buffers)
@@ -62,20 +63,22 @@ class PrefixCache:
         return keys, [self.entries.get(k) if k is not None else None for k in keys], [k in survivors for k in keys]
 
     def bases(self, model, keys, cached):
-        """Per request: (position, forked cache) to start a missed state from, via model.base_for on the cached state
-        sharing the most leading tokens with it, or None."""
-        out = []
+        """Per request: (position, forked cache) to start a missed state from, or None. The cached state sharing the most
+        leading tokens with it wins (model.base_position over every entry, then one model.base_for fork for the winner);
+        a state repeated within the batch gets None, since probs_batch reuses the first one's prefix."""
+        out, seen = [], set()
         for key, hit in zip(keys, cached):
             best = None
-            if key is not None and hit is None:
-                new = np.asarray(key[0])
+            if key is not None and hit is None and key not in seen:
+                new, top = np.asarray(key[0]), (0, None)
                 for (ids, iso), prefix in self.entries.items():
                     if iso != key[1]: continue
                     old = np.asarray(ids); n = min(len(old), len(new))
                     diff = np.flatnonzero(old[:n] != new[:n])
-                    base = model.base_for(prefix, int(diff[0]) if diff.size else n)
-                    if base is not None and (best is None or base[0] > best[0]): best = base
-            if best is not None: self.extended += 1; self.extended_tokens += best[0]
+                    pos = model.base_position(prefix, int(diff[0]) if diff.size else n)
+                    if pos is not None and pos > top[0]: top = (pos, prefix)
+                if top[1] is not None: best = model.base_for(top[1], top[0])
+            if key is not None: seen.add(key)
             out.append(best)
         return out
 
@@ -182,6 +185,8 @@ class Server:
             empty_cache(self.device)
         sync(self.device); dt = round((time.time() - t) * 1000, 1)
         self.prefix_cache.store(keys, cached, prefixes)
+        for b in bases or []:
+            if b is not None: self.prefix_cache.extended += 1; self.prefix_cache.extended_tokens += b[0]
         self.batches += 1; self.batched_requests += len(encs)
         bases = bases or [None] * len(encs)
         return [([q.tolist() for q in p], {"tokens": len(enc["ids"]), "state_tokens": enc["seg"].count(0), "latency_ms": dt, "prefix_cache_hit": c is not None,

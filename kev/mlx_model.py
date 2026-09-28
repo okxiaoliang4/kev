@@ -62,7 +62,9 @@ def merge_lora(lm, adapter_dir, scale=1.0):
 def fork(cache, at=None):
     """A cache that continues from `cache` without changing it: the attention layers' keys and values sliced to `at`
     (or to their end), the DeltaNet layers' conv + recurrent states from `at`'s snapshot (a list with None for attention
-    layers) or `cache`'s own. Slicing makes new arrays, so writes to the fork never reach `cache`."""
+    layers) or `cache`'s own. The key/value slices are views of `cache`'s buffers, cut exactly at the fork's offset: the
+    fork's first KVCache.update_and_fetch finds no room and concatenates into a new buffer, so its writes never reach
+    `cache`. Giving the fork headroom would break that. DeltaNet layers replace their arrays rather than write into them."""
     snap, n = (None, None) if at is None else at
     out = []
     for i, c in enumerate(cache):
@@ -132,25 +134,32 @@ class MLXDecisionModel:
     # reused by the next request with the same state. On Metal this is also the cheapest way to answer a single request
     # (state once instead of once per question), so it is the only path `forward` / `probs` take.
 
-    def prefix(self, enc, base=None):
-        """-> (state length, cache after the state, (tail snapshot position, DeltaNet states there)). base = (position,
-        forked cache) from base_for: only the state tokens after `position` run."""
+    def prefix(self, enc, base=None, snapshot=False):
+        """-> (state length, cache after the state, tail snapshot or None). base = (position, forked cache) from base_for:
+        only the state tokens after `position` run. snapshot=True (a prefix that will be cached for extension) runs the
+        state in two passes to keep the DeltaNet states PREFIX_TAIL tokens before its end: (position, states)."""
         Ls, ids = enc["seg"].count(0), enc["ids"]
         start, cache = base if base is not None else (0, make_prompt_cache(self.lm))
-        k = max(start, Ls - PREFIX_TAIL)
+        k = max(start, Ls - PREFIX_TAIL) if snapshot else Ls
         if k > start: self._hidden([ids[start:k]], cache)
-        snap = (k, [None if isinstance(c, KVCache) else list(c.cache) for c in cache])
+        snap = (k, [None if isinstance(c, KVCache) else list(c.cache) for c in cache]) if snapshot else None
         if Ls > k: self._hidden([ids[k:Ls]], cache)
         return Ls, cache, snap
 
     @staticmethod
-    def base_for(prefix, common):
-        """Where a state sharing its first `common` tokens with this cached prefix's state can start: (position, forked
-        cache), or None. DeltaNet states cannot be rewound, so only the end of the old state and its tail snapshot count."""
-        Ls, cache, (k, snap) = prefix
-        if common >= Ls: return Ls, fork(cache)
-        if common >= k and k > 0: return k, fork(cache, (snap, k))
+    def base_position(prefix, common):
+        """Where a state sharing its first `common` tokens with this cached prefix's state can start, or None. DeltaNet
+        states cannot be rewound, so only the end of the old state and its tail snapshot count. Allocates nothing."""
+        Ls, _, snap = prefix
+        if common >= Ls: return Ls
+        if snap is not None and common >= snap[0] > 0: return snap[0]
         return None
+
+    @staticmethod
+    def base_for(prefix, position):
+        """(position, cache forked at it) for a position base_position returned."""
+        Ls, cache, snap = prefix
+        return position, fork(cache) if position == Ls else fork(cache, (snap[1], position))
 
     def _branch_logits(self, enc, cache):
         """Branches as rows on a replicated copy of the state cache, rows_per_pass rows (and cache copies) at a time."""
@@ -174,7 +183,7 @@ class MLXDecisionModel:
         return self._branch_probs(enc, self.prefix(enc)[1])
 
     def probs_and_prefix(self, enc):
-        prefix = self.prefix(enc)
+        prefix = self.prefix(enc, snapshot=True)
         return self._branch_probs(enc, prefix[1]), prefix
 
     def probs_with_prefix(self, enc, prefix):
@@ -183,15 +192,15 @@ class MLXDecisionModel:
         return self._branch_probs(enc, cache)
 
     def probs_batch(self, encs, prefixes, keep, bases=None):
-        """kev.serve's batch call: one request at a time on Metal. bases[i] (from base_for) starts request i's state from
-        a cached one it extends; a state already run earlier in the batch is reused (concurrent requests of one client
-        usually repeat the state)."""
+        """kev.serve's batch call: one request at a time on Metal. bases (kev.serve with KEV_PREFIX_EXTEND on) turns
+        extension on: bases[i] (from base_for) starts request i's state from a cached one it extends, and a prefix that
+        will be kept gets its tail snapshot. Without bases every miss is the single state pass it always was. A state
+        already run earlier in the batch is reused (concurrent requests of one client usually repeat the state)."""
         ps, kept, seen = [], [], {}
         for i, (e, p, k) in enumerate(zip(encs, prefixes, keep)):
             sk = tuple(e["ids"][:e["seg"].count(0)])
             if p is None: p = seen.get(sk)
-            if p is None and bases is not None and bases[i] is not None: p = self.prefix(e, bases[i])
-            if p is None: p = self.prefix(e)
+            if p is None: p = self.prefix(e, bases[i] if bases is not None else None, snapshot=bases is not None and k)
             seen[sk] = p
             ps.append(self._branch_probs(e, p[1])); kept.append(p if k else None)
         return ps, kept

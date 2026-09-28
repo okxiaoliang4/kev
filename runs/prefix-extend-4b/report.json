@@ -14,31 +14,41 @@
     "bar": 0.04,
     "tie": 0.04,
     "max_dp": 0.01690039038658142,
-    "mean_dp": 0.0038297659251838923,
+    "mean_dp": 0.0036126059654634445,
     "argmax_flips": 1,
     "violations": [],
     "pass": true
   },
+  "cached_prefix_untouched": {
+    "checks": 15,
+    "extended": 15,
+    "bit_identical": 15,
+    "pass": true
+  },
+  "peak_memory_mb": {
+    "extend_on": 11182,
+    "extend_off": 15891
+  },
   "model_ms": {
     "extend_on": {
-      "median": 298.4,
+      "median": 326.5,
       "by_quarter": [
-        327.3,
-        342.3,
-        195.8,
-        225.6
+        363.5,
+        413.6,
+        210.8,
+        248.8
       ],
-      "total_s": 43.3
+      "total_s": 49.1
     },
     "extend_off": {
-      "median": 839.6,
+      "median": 1363.7,
       "by_quarter": [
-        468.4,
-        755.4,
-        1744.1,
-        5889.4
+        616.5,
+        1158.1,
+        2836.6,
+        6320.2
       ],
-      "total_s": 350.9
+      "total_s": 441.5
     }
   },
   "dtype": "bfloat16"

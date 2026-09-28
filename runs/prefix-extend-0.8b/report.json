@@ -13,32 +13,42 @@
   "parity_vs_scratch": {
     "bar": 0.04,
     "tie": 0.04,
-    "max_dp": 0.023512452840805054,
-    "mean_dp": 0.003302476747194305,
+    "max_dp": 0.030017077922821045,
+    "mean_dp": 0.0037899453134741636,
     "argmax_flips": 2,
     "violations": [],
     "pass": true
   },
+  "cached_prefix_untouched": {
+    "checks": 15,
+    "extended": 15,
+    "bit_identical": 15,
+    "pass": true
+  },
+  "peak_memory_mb": {
+    "extend_on": 2802,
+    "extend_off": 5714
+  },
   "model_ms": {
     "extend_on": {
-      "median": 70.2,
+      "median": 66.2,
       "by_quarter": [
-        70.6,
-        74.3,
-        47.7,
-        83.6
+        72.4,
+        76.0,
+        43.9,
+        55.8
       ],
-      "total_s": 10.9
+      "total_s": 9.8
     },
     "extend_off": {
-      "median": 247.7,
+      "median": 164.6,
       "by_quarter": [
-        137.2,
-        220.9,
-        491.3,
-        1616.0
+        97.8,
+        149.6,
+        342.1,
+        953.8
       ],
-      "total_s": 114.0
+      "total_s": 62.1
     }
   },
   "dtype": "bfloat16"
